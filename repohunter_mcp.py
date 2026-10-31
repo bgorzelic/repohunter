@@ -18,11 +18,25 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 import urllib.parse
 
-UA = "RepoHunter-MCP/0.1"
-GHTOK = os.environ.get("GITHUB_TOKEN", "")
+UA = "RepoHunter-MCP/0.2"
+def _token():
+    """GITHUB_TOKEN if set, else the gh CLI's token (raises the search limit from 10 to 30 a minute). Never logged."""
+    tok = os.environ.get("GITHUB_TOKEN", "")
+    if tok:
+        return tok
+    try:
+        import subprocess
+        r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+GHTOK = _token()
 NOW = int(time.time())
 NOTE_SCORE = ("Scores are RepoHunter's transparent heuristic over public GitHub data — guidance, not a "
               "guarantee. Verify (especially security + license) before adopting.")
@@ -50,7 +64,7 @@ def _evidence(endpoint, *, method, inputs, scope):
                      "endpoint": "https://api.github.com" + endpoint,
                      "scope": scope}],
         "derivation": {"method": method, "inputs": inputs,
-                       "formula_version": "repohunter-mcp-0.1"},
+                       "formula_version": "repohunter-mcp-0.2"},
         "limits": list(EVIDENCE_LIMITS),
         "review": {
             "decision_owner": "user",
@@ -71,8 +85,17 @@ def gh(path):
                                  headers={"User-Agent": UA, "Accept": "application/vnd.github+json"})
     if GHTOK:
         req.add_header("Authorization", "Bearer " + GHTOK)
-    with urllib.request.urlopen(req, timeout=25) as r:
-        return json.loads(r.read().decode("utf-8", "ignore"))
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            return json.loads(r.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429) and e.headers.get("X-RateLimit-Remaining") == "0":
+            reset = int(e.headers.get("X-RateLimit-Reset") or 0)
+            wait = max(0, reset - int(time.time()))
+            raise RuntimeError("GitHub rate limit reached (%s); resets in about %d s. %s" % (
+                "authenticated" if GHTOK else "unauthenticated: set GITHUB_TOKEN or run 'gh auth login'", wait,
+                "Retry after the reset.")) from None
+        raise
 
 
 def _days(iso):
@@ -82,11 +105,25 @@ def _days(iso):
         return 9999
 
 
+def _norm(parts):
+    """Lowercased text plus an alnum-squashed copy so 'Wi-Fi' matches the keyword 'wifi'."""
+    t = " ".join(p for p in parts if p).lower()
+    return t, re.sub(r"[^a-z0-9]+", "", t)
+
+
+def _kw_hit(k, text, squashed):
+    """Word-boundary match; longer keywords also match across hyphens ('wifi' in 'Wi-Fi').
+    Short keywords (rf, ap) stay boundary-only so 'rf' does not match inside 'performance'."""
+    if re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", text):
+        return True
+    return len(k) > 3 and k in squashed
+
+
 def score(m, keywords=None):
     kws = keywords or []
-    text = " ".join([m.get("description") or "", " ".join(m.get("topics") or []),
-                     m.get("name") or "", m.get("language") or ""]).lower()
-    rel = min(100, 20 + sum(6 for k in kws if k.lower() in text))
+    text, squashed = _norm([m.get("description") or "", " ".join(m.get("topics") or []),
+                            m.get("name") or "", m.get("language") or ""])
+    rel = min(100, 12 * sum(1 for k in kws if _kw_hit(k.lower(), text, squashed)))
     stars = m.get("stargazers_count", 0)
     pop = min(100, int(math.log10(stars + 1) * 22))
     fd = _days(m.get("pushed_at"))
@@ -119,8 +156,42 @@ def resource_fit(m):
     return {"verdict": "runs easily", "note": "ordinary app resources"}
 
 
+_STOP = {"the", "and", "for", "with", "from", "into", "that", "this", "tool", "tools", "library", "app", "using", "based", "open", "source"}
+
+# Generic words that match nearly every repo and so carry no relevance signal.
+_GENERIC = _STOP | {
+    "design", "designer", "plan", "plans", "planner", "planning", "prediction", "coverage",
+    "network", "networks", "networking", "system", "systems", "manager", "management",
+    "software", "project", "projects", "application", "service", "server", "platform",
+    "import", "export", "load", "build", "building", "check", "checks", "site", "sites",
+    "real", "stats", "verdict", "verdicts", "maybe", "skip", "itself", "dogfood",
+    "transparent", "evidence", "provenance", "agent", "agents", "github", "data",
+    "offline", "online", "free", "paid", "get", "gets", "make", "makes", "like",
+}
+
+# Short words that are never keywords (the generic set above only sees len >= 4 via _STOP usage).
+_SHORT_STOP = {"to", "of", "in", "on", "at", "is", "it", "be", "or", "an", "as", "by", "we", "my",
+               "me", "you", "us", "so", "no", "go", "up", "per", "via", "get", "got", "new", "now",
+               "own", "see", "say", "use", "used", "uses", "one", "two", "all", "any", "our", "their"}
+
+# Short acronyms that DO carry domain signal (kept despite len < 4).
+_ACRONYMS = {"rf", "ap", "3d", "poe", "qos", "bom", "cad", "dxf", "ifc", "snr", "sinr", "mcs"}
+
+
 def _kws_from(project):
-    return [w for w in re.findall(r"[a-z]+", (project or "").lower()) if len(w) > 3][:12] if project else None
+    """Domain keywords from free text: deduped, stop/generic words dropped, short domain acronyms kept."""
+    if not project:
+        return None
+    out = []
+    for w in re.findall(r"[a-z][a-z0-9-]*", project.lower()):
+        w = w.strip("-")
+        if not w or w in _GENERIC or w in _SHORT_STOP:
+            continue
+        if len(w) < 4 and not re.search(r"\d", w) and w not in _ACRONYMS:
+            continue
+        if w not in out:
+            out.append(w)
+    return out[:12] if out else None
 
 
 # ── skills ─────────────────────────────────────────────────────────────────────
@@ -143,24 +214,53 @@ def skill_evaluate_repo(args):
             "_note": NOTE_SCORE, "_untrusted": NOTE_UNTRUSTED}
 
 
+def _words(q):
+    return [w for w in re.findall(r"[a-z0-9][a-z0-9\-]+", q.lower()) if w not in _STOP]
+
+
+def _overlap(d, words):
+    """How many query words appear in the repo's own metadata (name, description, topics)."""
+    text, squashed = _norm([d.get("name") or "", d.get("description") or "",
+                            " ".join(d.get("topics") or [])])
+    return sum(1 for w in words if _kw_hit(w, text, squashed))
+
+
 def skill_find_repos(args):
     q = (args.get("query") or args.get("need") or "").strip()
     if not q:
         return {"error": "pass a 'query' describing what you need"}
-    endpoint = "/search/repositories?sort=stars&per_page=8&q=" + urllib.parse.quote(q)
+    per_page = 15
+    endpoint = "/search/repositories?sort=stars&per_page=%d&q=" % per_page + urllib.parse.quote(q)
     res = gh(endpoint)
+    fallback = None
+    words = _words(q)
+    # GitHub ANDs every term, so long natural-language queries often match nothing: retry with the
+    # domain terms. Picking the longest words drifts off-topic ('planner', 'coverage') — keep the
+    # specific ones ('rf', 'wifi', 'wlan'); seen 2026-10-31.
+    if not res.get("items") and len(words) > 2:
+        domain = [w for w in words if w not in _GENERIC]
+        picked = domain[:2] if domain else sorted(words, key=len, reverse=True)[:2]
+        fallback = " ".join(picked)
+        endpoint = "/search/repositories?sort=stars&per_page=%d&q=" % per_page + urllib.parse.quote(fallback)
+        res = gh(endpoint)
+    # GitHub also matches readme text we cannot see: keep only repos whose own metadata overlaps
+    # the query, or spam and SEO repos outrank the relevant ones; seen 2026-10-31.
+    need = min(2, len(words)) or 1
+    items = [d for d in res.get("items", []) if _overlap(d, words) >= need]
     kws = _kws_from(q)
     out = []
-    for d in res.get("items", []):
+    for d in items:
         s = score(d, kws)
         out.append({"repo": d.get("full_name"), "url": d.get("html_url"),
                     "description": (d.get("description") or "")[:140], "stars": d.get("stargazers_count"),
                     "language": d.get("language"), "verdict": s["verdict"], "overall": s["overall"]})
-    return {"query": q, "candidates": out,
+    out.sort(key=lambda c: (c["overall"], c["stars"]), reverse=True)
+    return {"query": q, "fallback_query": fallback, "candidates": out,
             "evidence": _evidence(endpoint,
-                                  method="GitHub search followed by repository reuse heuristic",
+                                  method=("GitHub search, client-side query-overlap filter, "
+                                          "then repository reuse heuristic"),
                                   inputs=["user search query",
-                                          "up to 8 GitHub search results sorted by stars"],
+                                          "up to %d GitHub search results sorted by stars" % per_page],
                                   scope="public repository discovery results"),
             "_note": "Ranked by RepoHunter's heuristic over live GitHub search — evaluate_repo the strongest before adopting.",
             "_untrusted": NOTE_UNTRUSTED}

@@ -4,6 +4,25 @@ All notable changes to RepoHunter are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); pre-1.0 releases are date-based.
 
 ## [Unreleased]
+### Fixed
+- MCP `find_repos`: spam and SEO repos with no query overlap in their own metadata could outrank
+  relevant repos (a 150-star SQL dump beat the actual Wi-Fi design app for "wifi site survey
+  design", measured 2026-10-31). Every candidate now must overlap the query in its
+  name/description/topics, and results rank by the heuristic overall score, not raw star order
+- MCP `find_repos` fallback picked the two *longest* query words, dropping short domain terms
+  ("rf", "wifi", "wlan") and drifting off-topic or returning nothing ("wlan planner heatmap" ->
+  "planner heatmap" -> zero results). It now prefers domain terms ("rf wifi", "wlan heatmap")
+- MCP relevance (`evaluate_repo`, `find_repos`) had a free 20-point base and matched junk keywords
+  ("maybe", "skip", "design"), so unrelated repos read as relevant. Relevance is now 12 x real
+  keyword hits, with stop/generic words dropped and domain acronyms (rf, bom, poe, ...) kept
+- Keyword matching: "Wi-Fi" now matches the keyword "wifi" (alnum-squash), while short acronyms
+  like "rf" stay word-boundary-only and no longer match inside words like "performance"
+- MCP search page size 8 -> 15 for recall before the overlap filter
+
+### Added
+- 7 regression tests in `test_repohunter_mcp.py`, one per failure mode above (118 tests total);
+  evidence `formula_version` is now `repohunter-mcp-0.2`
+
 - Soak-week hardening + full docs (see `SOAK_WEEK.md`)
 - Landing-page guided walkthrough + larger hero logo
 - Green **"compute saved ≈ energy ≈ CO₂ avoided"** estimate on adoptions _(planned)_
