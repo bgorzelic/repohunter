@@ -226,7 +226,7 @@ INCIDENT_WINDOW_DAYS = 90
 ADVISORY_WINDOW_DAYS = 180
 # Strong, narrow phrases only: a project that fixes things responsibly must not be demoted for saying so.
 _CONSENT = r"without\s+(?:asking|(?:your\s+)?(?:consent|permission|knowledge)|opt[- ]?in)"
-SCAN_CHARS = 20000  # release bodies are untrusted and can reach 125k chars; never regex-scan more than this
+SCAN_CHARS = 40000  # release bodies are untrusted (up to 125k chars); scan at most this, then fail closed
 # \w{0,12}, not \w*: an unbounded suffix next to the lazy gap below made matching quadratic (ReDoS).
 _EGRESS = r"(?:upload|send|sent|transmit|collect|share[ds]?|scann?(?:ed|ing)?|log(?:ged|ging)?|track(?:ed|ing)?)\w{0,12}"
 # "without asking" alone is ubiquitous in agent tooling ("agent edits files without asking"), so it only counts
@@ -261,8 +261,14 @@ def release_signals(slug):
     for r in releases or []:
         if not isinstance(r, dict) or _days(r.get("published_at")) > INCIDENT_WINDOW_DAYS:
             continue
-        text = ("%s\n%s" % (r.get("name") or "", r.get("body") or ""))[:SCAN_CHARS]
+        full = "%s\n%s" % (r.get("name") or "", r.get("body") or "")
+        text = full[:SCAN_CHARS]
         base = {"tag": r.get("tag_name"), "published": (r.get("published_at") or "")[:10]}
+        if len(full) > SCAN_CHARS:
+            # Fail closed: padding must not be able to push incident wording past the scan. A partial
+            # scan is never "clean", and it blocks GO the same way a found incident does.
+            flags.append(dict(base, kind="release-notes-truncated", caps_verdict=True,
+                              excerpt="%d chars; only the first %d were scanned" % (len(full), SCAN_CHARS)))
         m = _INCIDENT_RE.search(text)
         if m:
             flags.append(dict(base, kind="release-notes-privacy-or-security-incident",
@@ -275,7 +281,10 @@ def release_signals(slug):
             flags.append({"kind": "published-advisory", "id": a.get("ghsa_id"), "severity": a.get("severity"),
                           "published": (a.get("published_at") or "")[:10],
                           "excerpt": _desc(a.get("summary"))[:200], "caps_verdict": True})
-    return {"release_notes_checked": releases is not None, "advisories_checked": advisories is not None,
+    partial = any(f["kind"] == "release-notes-truncated" for f in flags)
+    return {"release_notes_checked": releases is not None,
+            "release_notes_fully_checked": releases is not None and not partial,
+            "advisories_checked": advisories is not None,
             "windows_days": {"release_notes": INCIDENT_WINDOW_DAYS, "advisories": ADVISORY_WINDOW_DAYS},
             "flags": flags, "endpoints": [rpath, apath]}
 

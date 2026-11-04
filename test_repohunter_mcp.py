@@ -209,11 +209,26 @@ class VerdictSignals(unittest.TestCase):
             self.assertLess(time.perf_counter() - start, 2.0, body[:12])
             self.assertTrue(out["signals"]["release_notes_checked"])
 
-    def test_incident_phrase_beyond_the_scan_cap_is_not_read(self):
-        padding = "x " * 15000
-        body = padding + "Telemetry is sent to our servers without consent."
+    def test_oversize_release_notes_fail_closed_never_clean(self):
+        # A hostile repo can pad notes past the scan cap so the incident wording is never read.
+        # That must not look clean: report it, mark the scan partial, and never allow GO.
+        body = "x " * 30000 + "Telemetry is sent to our servers without consent."
         out = self.evaluate(releases=[{"tag_name": "v", "published_at": _days_ago(1), "body": body}])
-        self.assertEqual(out["signals"]["flags"], [])
+        self.assertEqual(out["verdict"], "MAYBE")
+        self.assertEqual(out["signals"]["flags"][0]["kind"], "release-notes-truncated")
+        self.assertTrue(out["signals"]["verdict_capped"])
+        self.assertFalse(out["signals"]["release_notes_fully_checked"])
+
+    def test_long_but_scannable_release_notes_are_fully_checked(self):
+        body = "x " * 5000 + "Telemetry is sent to our servers without consent."
+        out = self.evaluate(releases=[{"tag_name": "v", "published_at": _days_ago(1), "body": body}])
+        self.assertEqual(out["signals"]["flags"][0]["kind"], "release-notes-privacy-or-security-incident")
+        self.assertTrue(out["signals"]["release_notes_fully_checked"])
+
+    def test_old_oversize_release_notes_do_not_matter(self):
+        out = self.evaluate(releases=[{"tag_name": "v", "published_at": _days_ago(300), "body": "x" * 90000}])
+        self.assertEqual(out["verdict"], "GO")
+        self.assertTrue(out["signals"]["release_notes_fully_checked"])
 
     def test_cve_mention_is_informational_only(self):
         out = self.evaluate(releases=[{"tag_name": "v3", "published_at": _days_ago(1),

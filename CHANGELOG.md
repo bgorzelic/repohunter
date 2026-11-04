@@ -12,9 +12,12 @@ All notable changes to RepoHunter are documented here. Format follows
   Signals never raise a verdict. A failed fetch is reported as not checked, never as clean. Found
   on 2026-11-04 when claude-mem scored GO while its own v15.8.3 notes described uploading prompts
   without asking. Advisory-id mentions (CVE/GHSA) are informational only. Release text is untrusted
-  and the untrusted-content note now covers it. Scanned text is capped at 20,000 characters and
-  the patterns are bounded, so a hostile release body cannot cause regex backtracking (an earlier
-  draft was quadratic; regression-tested).
+  and the untrusted-content note now covers it. Scanned text per release is capped at 40,000
+  characters and the patterns are bounded, so a hostile release body cannot cause regex
+  backtracking (an earlier draft was quadratic; worst case now about 0.2s per release). A release
+  longer than the cap fails closed: it adds a `release-notes-truncated` flag, sets
+  `release_notes_fully_checked: false`, and caps GO at MAYBE, so padding cannot hide incident
+  wording past the scan.
 - MCP `evaluate_repo` reports `resolved_name` when a repo was renamed or moved (case-only
   differences are ignored), keeping the requested name as the evidence endpoint, and `fork_of`
   for forks.
