@@ -12,7 +12,9 @@ All notable changes to RepoHunter are documented here. Format follows
   Signals never raise a verdict. A failed fetch is reported as not checked, never as clean. Found
   on 2026-11-04 when claude-mem scored GO while its own v15.8.3 notes described uploading prompts
   without asking. Advisory-id mentions (CVE/GHSA) are informational only. Release text is untrusted
-  and the untrusted-content note now covers it.
+  and the untrusted-content note now covers it. Scanned text is capped at 20,000 characters and
+  the patterns are bounded, so a hostile release body cannot cause regex backtracking (an earlier
+  draft was quadratic; regression-tested).
 - MCP `evaluate_repo` reports `resolved_name` when a repo was renamed or moved (case-only
   differences are ignored), keeping the requested name as the evidence endpoint, and `fork_of`
   for forks.

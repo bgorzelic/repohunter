@@ -200,6 +200,21 @@ class VerdictSignals(unittest.TestCase):
             out = self.evaluate(releases=[{"tag_name": "v9", "published_at": _days_ago(1), "body": body}])
             self.assertEqual(out["verdict"], "MAYBE", body)
 
+    def test_hostile_release_body_cannot_stall_the_scanner(self):
+        # Regression for a ReDoS: unbounded \w* before a lazy gap made matching quadratic on a long
+        # run of egress-like words. GitHub allows 125k-char release bodies; the scan must stay fast.
+        for body in ("upload" * 20000, "sent " + "a" * 120000, "exfiltrat" + "e" * 120000):
+            start = time.perf_counter()
+            out = self.evaluate(releases=[{"tag_name": "v", "published_at": _days_ago(1), "body": body}])
+            self.assertLess(time.perf_counter() - start, 2.0, body[:12])
+            self.assertTrue(out["signals"]["release_notes_checked"])
+
+    def test_incident_phrase_beyond_the_scan_cap_is_not_read(self):
+        padding = "x " * 15000
+        body = padding + "Telemetry is sent to our servers without consent."
+        out = self.evaluate(releases=[{"tag_name": "v", "published_at": _days_ago(1), "body": body}])
+        self.assertEqual(out["signals"]["flags"], [])
+
     def test_cve_mention_is_informational_only(self):
         out = self.evaluate(releases=[{"tag_name": "v3", "published_at": _days_ago(1),
                                        "body": "Bump lodash to fix CVE-2026-12345."}])

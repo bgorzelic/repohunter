@@ -226,11 +226,13 @@ INCIDENT_WINDOW_DAYS = 90
 ADVISORY_WINDOW_DAYS = 180
 # Strong, narrow phrases only: a project that fixes things responsibly must not be demoted for saying so.
 _CONSENT = r"without\s+(?:asking|(?:your\s+)?(?:consent|permission|knowledge)|opt[- ]?in)"
-_EGRESS = r"(?:upload|send|sent|transmit|collect|share[ds]?|scann?(?:ed|ing)?|log(?:ged|ging)?|track(?:ed|ing)?)\w*"
+SCAN_CHARS = 20000  # release bodies are untrusted and can reach 125k chars; never regex-scan more than this
+# \w{0,12}, not \w*: an unbounded suffix next to the lazy gap below made matching quadratic (ReDoS).
+_EGRESS = r"(?:upload|send|sent|transmit|collect|share[ds]?|scann?(?:ed|ing)?|log(?:ged|ging)?|track(?:ed|ing)?)\w{0,12}"
 # "without asking" alone is ubiquitous in agent tooling ("agent edits files without asking"), so it only counts
 # when data leaving the machine is named in the same sentence.
 _INCIDENT_RE = re.compile(
-    r"%s[^.\n]{0,200}?%s|%s[^.\n]{0,200}?%s|exfiltrat\w+"
+    r"%s[^.\n]{0,200}?%s|%s[^.\n]{0,200}?%s|exfiltrat\w{1,12}"
     r"|(?:leak|expos)(?:ed|es|ing)\s+(?:api\s+keys?|secrets?|credentials?|tokens?|prompts?)"
     % (_EGRESS, _CONSENT, _CONSENT, _EGRESS), re.I)
 _ADVISORY_ID_RE = re.compile(r"GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}|CVE-\d{4}-\d{4,}", re.I)
@@ -259,7 +261,7 @@ def release_signals(slug):
     for r in releases or []:
         if not isinstance(r, dict) or _days(r.get("published_at")) > INCIDENT_WINDOW_DAYS:
             continue
-        text = "%s\n%s" % (r.get("name") or "", r.get("body") or "")
+        text = ("%s\n%s" % (r.get("name") or "", r.get("body") or ""))[:SCAN_CHARS]
         base = {"tag": r.get("tag_name"), "published": (r.get("published_at") or "")[:10]}
         m = _INCIDENT_RE.search(text)
         if m:
