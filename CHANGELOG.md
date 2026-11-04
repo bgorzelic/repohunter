@@ -4,6 +4,51 @@ All notable changes to RepoHunter are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); pre-1.0 releases are date-based.
 
 ## [Unreleased]
+### Added
+- MCP `evaluate_repo` now returns `signals`: a keyword scan of release notes from the last 90 days
+  and published security advisories from the last 180 days. A privacy or security incident (data
+  leaving the machine without consent, exfiltration, leaked secrets, or a published advisory) caps
+  a GO verdict at MAYBE and is reported with the release tag, date and a 200-character excerpt.
+  Signals never raise a verdict. A failed fetch is reported as not checked, never as clean. Found
+  on 2026-11-04 when claude-mem scored GO while its own v15.8.3 notes described uploading prompts
+  without asking. Advisory-id mentions (CVE/GHSA) are informational only. Release text is untrusted
+  and the untrusted-content note now covers it. Scanned text per release is capped at 40,000
+  characters and the patterns are bounded, so a hostile release body cannot cause regex
+  backtracking (an earlier draft was quadratic; worst case now about 0.2s per release). A release
+  longer than the cap fails closed: it adds a `release-notes-truncated` flag, sets
+  `release_notes_fully_checked: false`, and caps GO at MAYBE, so padding cannot hide incident
+  wording past the scan.
+- MCP `evaluate_repo` reports `resolved_name` when a repo was renamed or moved (case-only
+  differences are ignored), keeping the requested name as the evidence endpoint, and `fork_of`
+  for forks.
+- MCP relevance now counts README keyword hits (4 points each, capped at 24, description hits stay
+  at 12). `evaluate_repo` only; `find_repos` does not fetch READMEs.
+
+### Changed
+- Words that describe the asker rather than the domain ("user", "wanting", "solo", "consulting",
+  and similar) are no longer relevance keywords.
+- The evidence limit now reads "Code-level security vulnerabilities ... are not checked", since
+  release notes and advisories are now scanned.
+
+### Fixed
+- MCP `find_repos`: spam and SEO repos with no query overlap in their own metadata could outrank
+  relevant repos (a 150-star SQL dump beat the actual Wi-Fi design app for "wifi site survey
+  design", measured 2026-10-31). Every candidate now must overlap the query in its
+  name/description/topics, and results rank by the heuristic overall score, not raw star order
+- MCP `find_repos` fallback picked the two *longest* query words, dropping short domain terms
+  ("rf", "wifi", "wlan") and drifting off-topic or returning nothing ("wlan planner heatmap" ->
+  "planner heatmap" -> zero results). It now prefers domain terms ("rf wifi", "wlan heatmap")
+- MCP relevance (`evaluate_repo`, `find_repos`) had a free 20-point base and matched junk keywords
+  ("maybe", "skip", "design"), so unrelated repos read as relevant. Relevance is now 12 x real
+  keyword hits, with stop/generic words dropped and domain acronyms (rf, bom, poe, ...) kept
+- Keyword matching: "Wi-Fi" now matches the keyword "wifi" (alnum-squash), while short acronyms
+  like "rf" stay word-boundary-only and no longer match inside words like "performance"
+- MCP search page size 8 -> 15 for recall before the overlap filter
+
+### Added
+- 7 regression tests in `test_repohunter_mcp.py`, one per failure mode above (118 tests total);
+  evidence `formula_version` is now `repohunter-mcp-0.2`
+
 - Soak-week hardening + full docs (see `SOAK_WEEK.md`)
 - Landing-page guided walkthrough + larger hero logo
 - Green **"compute saved ≈ energy ≈ CO₂ avoided"** estimate on adoptions _(planned)_
