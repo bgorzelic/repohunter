@@ -4,6 +4,27 @@ All notable changes to RepoHunter are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); pre-1.0 releases are date-based.
 
 ## [Unreleased]
+### Added
+- MCP `evaluate_repo` now returns `signals`: a keyword scan of release notes from the last 90 days
+  and published security advisories from the last 180 days. A privacy or security incident (data
+  leaving the machine without consent, exfiltration, leaked secrets, or a published advisory) caps
+  a GO verdict at MAYBE and is reported with the release tag, date and a 200-character excerpt.
+  Signals never raise a verdict. A failed fetch is reported as not checked, never as clean. Found
+  on 2026-11-04 when claude-mem scored GO while its own v15.8.3 notes described uploading prompts
+  without asking. Advisory-id mentions (CVE/GHSA) are informational only. Release text is untrusted
+  and the untrusted-content note now covers it.
+- MCP `evaluate_repo` reports `resolved_name` when a repo was renamed or moved (case-only
+  differences are ignored), keeping the requested name as the evidence endpoint, and `fork_of`
+  for forks.
+- MCP relevance now counts README keyword hits (4 points each, capped at 24, description hits stay
+  at 12). `evaluate_repo` only; `find_repos` does not fetch READMEs.
+
+### Changed
+- Words that describe the asker rather than the domain ("user", "wanting", "solo", "consulting",
+  and similar) are no longer relevance keywords.
+- The evidence limit now reads "Code-level security vulnerabilities ... are not checked", since
+  release notes and advisories are now scanned.
+
 ### Fixed
 - MCP `find_repos`: spam and SEO repos with no query overlap in their own metadata could outrank
   relevant repos (a 150-star SQL dump beat the actual Wi-Fi design app for "wifi site survey

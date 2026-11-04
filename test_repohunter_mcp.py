@@ -1,4 +1,5 @@
 """Contract tests for RepoHunter's agent-facing evidence output (no network)."""
+import time
 import unittest
 from unittest.mock import patch
 
@@ -30,8 +31,9 @@ class EvidenceContract(unittest.TestCase):
         self.assertTrue(any("bias" in limit for limit in evidence["limits"]))
         self.assertTrue(any("not checked" in limit for limit in evidence["limits"]))
 
+    @patch.object(mcp, "gh_text", return_value="")
     @patch.object(mcp, "gh", return_value=REPO)
-    def test_evaluate_repo_includes_reviewable_provenance(self, _gh):
+    def test_evaluate_repo_includes_reviewable_provenance(self, _gh, _txt):
         out = mcp.skill_evaluate_repo({"repo": "example/project", "project": "Python service"})
         self.assert_evidence(out["evidence"], "/repos/example/project")
         self.assertEqual(out["url"], REPO["html_url"])
@@ -126,6 +128,147 @@ class FindReposQuality(unittest.TestCase):
         self.assertIn("bom", kws)
         for junk in ("design", "tool", "plans", "plan"):
             self.assertNotIn(junk, kws)
+
+
+def _days_ago(n):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mcp.NOW - n * 86400))
+
+
+# A mature, popular, fresh repo that scores GO on metadata alone.
+GO_REPO = dict(REPO, full_name="example/popular", name="popular", stargazers_count=100000,
+               pushed_at=_days_ago(2), created_at="2022-01-01T00:00:00Z")
+
+# Wording taken from the real thedotmack/claude-mem v15.8.3 release notes (2026-11-02).
+INCIDENT_NOTES = ("## Privacy fix\n\nBrowser setup no longer uploads your prompts without asking.\n\n"
+                  "The browser setup scanned local agent histories and uploaded the full text of the last "
+                  "30 days of prompts, with session IDs and folder paths, without asking.\n\n"
+                  "Prompts already uploaded by earlier versions are not removed by this update.")
+
+
+def routed(repo, releases=None, advisories=None, fail=()):
+    """gh() stand-in that answers each API path differently."""
+    def fake(path):
+        for bad in fail:
+            if bad in path:
+                raise RuntimeError("boom")
+        if "/releases" in path:
+            return releases if releases is not None else []
+        if "/security-advisories" in path:
+            return advisories if advisories is not None else []
+        return repo
+    return fake
+
+
+class VerdictSignals(unittest.TestCase):
+    def evaluate(self, repo=GO_REPO, slug="example/popular", **kw):
+        with patch.object(mcp, "gh", routed(repo, **kw)), patch.object(mcp, "gh_text", return_value=""):
+            return mcp.skill_evaluate_repo({"repo": slug})
+
+    def test_baseline_is_go(self):
+        self.assertEqual(self.evaluate()["verdict"], "GO")
+
+    def test_recent_release_with_consent_incident_caps_go_to_maybe(self):
+        out = self.evaluate(releases=[{"tag_name": "v15.8.3", "name": "v15.8.3",
+                                       "published_at": _days_ago(2), "body": INCIDENT_NOTES}])
+        self.assertEqual(out["verdict"], "MAYBE")
+        self.assertEqual(out["signals"]["flags"][0]["tag"], "v15.8.3")
+        self.assertIn("without asking", out["signals"]["flags"][0]["excerpt"].lower())
+        self.assertTrue(out["signals"]["verdict_capped"])
+        self.assertLessEqual(len(out["signals"]["flags"][0]["excerpt"]), 200)
+
+    def test_old_incident_release_is_not_flagged(self):
+        out = self.evaluate(releases=[{"tag_name": "v1", "published_at": _days_ago(200), "body": INCIDENT_NOTES}])
+        self.assertEqual(out["verdict"], "GO")
+        self.assertEqual(out["signals"]["flags"], [])
+
+    def test_ordinary_upload_wording_is_not_flagged(self):
+        out = self.evaluate(releases=[{"tag_name": "v2", "published_at": _days_ago(1),
+                                       "body": "Fix: uploaded files are retried. Security fix for the docs build."}])
+        self.assertEqual(out["verdict"], "GO")
+
+    def test_agent_permission_wording_is_not_a_privacy_incident(self):
+        # Real release-note phrasing from Superpowers v7.0.1 and t3code v0.1.4: agents acting "without asking".
+        for body in ("it skipped the doc without asking in 24 of 24 runs before this change",
+                     "docs(agents): agents verify in a browser or simulator without asking"):
+            out = self.evaluate(releases=[{"tag_name": "v9", "published_at": _days_ago(1), "body": body}])
+            self.assertEqual(out["verdict"], "GO", body)
+            self.assertEqual(out["signals"]["flags"], [], body)
+
+    def test_data_egress_without_consent_is_flagged_in_either_order(self):
+        for body in ("Telemetry is sent to our servers without consent.",
+                     "Without your permission, the installer collected your shell history."):
+            out = self.evaluate(releases=[{"tag_name": "v9", "published_at": _days_ago(1), "body": body}])
+            self.assertEqual(out["verdict"], "MAYBE", body)
+
+    def test_cve_mention_is_informational_only(self):
+        out = self.evaluate(releases=[{"tag_name": "v3", "published_at": _days_ago(1),
+                                       "body": "Bump lodash to fix CVE-2026-12345."}])
+        self.assertEqual(out["verdict"], "GO")
+        self.assertEqual(out["signals"]["flags"][0]["kind"], "advisory-id-mentioned")
+
+    def test_recent_published_advisory_caps_go(self):
+        out = self.evaluate(advisories=[{"ghsa_id": "GHSA-abcd-1234-wxyz", "severity": "high",
+                                         "summary": "Token leak", "published_at": _days_ago(30)}])
+        self.assertEqual(out["verdict"], "MAYBE")
+        self.assertEqual(out["signals"]["flags"][0]["kind"], "published-advisory")
+
+    def test_signal_fetch_failure_degrades_and_says_so(self):
+        out = self.evaluate(fail=("/releases", "/security-advisories"))
+        self.assertEqual(out["verdict"], "GO")
+        self.assertFalse(out["signals"]["release_notes_checked"])
+        self.assertFalse(out["signals"]["advisories_checked"])
+
+    def test_signals_never_raise_a_verdict(self):
+        low = dict(GO_REPO, archived=True)
+        self.assertEqual(self.evaluate(repo=low)["verdict"], "SKIP")
+
+    def test_signal_endpoints_are_listed_in_evidence_after_the_repo_endpoint(self):
+        out = self.evaluate()
+        eps = [s["endpoint"] for s in out["evidence"]["sources"]]
+        self.assertEqual(eps[0], "https://api.github.com/repos/example/popular")
+        self.assertTrue(any("/releases" in e for e in eps))
+        self.assertTrue(any("not checked" in l for l in out["evidence"]["limits"]))
+
+    def test_rename_is_reported_and_endpoint_keeps_requested_name(self):
+        moved = dict(GO_REPO, full_name="new-owner/ECC")
+        out = self.evaluate(repo=moved, slug="old-owner/everything")
+        self.assertEqual(out["resolved_name"], {"requested": "old-owner/everything", "resolved": "new-owner/ECC"})
+        self.assertEqual(out["evidence"]["sources"][0]["endpoint"],
+                         "https://api.github.com/repos/old-owner/everything")
+
+    def test_case_only_difference_is_not_a_rename(self):
+        out = self.evaluate(repo=dict(GO_REPO, full_name="Example/Popular"))
+        self.assertNotIn("resolved_name", out)
+
+    def test_fork_is_flagged_with_parent(self):
+        out = self.evaluate(repo=dict(GO_REPO, fork=True, parent={"full_name": "upstream/popular"}))
+        self.assertEqual(out["fork_of"], "upstream/popular")
+
+
+class ReadmeRelevance(unittest.TestCase):
+    META = {"description": "framework", "topics": [], "name": "fw", "stargazers_count": 10}
+
+    def test_description_hits_still_score_twelve(self):
+        s = mcp.score(dict(self.META, description="skills framework"), ["skills"])
+        self.assertEqual(s["relevance"], 12)
+
+    def test_readme_only_hit_scores_less_than_description_hit(self):
+        s = mcp.score(self.META, ["skills"], readme="install the skills here")
+        self.assertEqual(s["relevance"], 4)
+
+    def test_readme_contribution_is_capped(self):
+        kws = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]
+        s = mcp.score(self.META, kws, readme=" ".join(kws))
+        self.assertEqual(s["relevance"], 24)
+
+    def test_no_readme_means_no_change(self):
+        self.assertEqual(mcp.score(self.META, ["skills"])["relevance"], 0)
+
+    def test_asker_words_are_not_keywords(self):
+        kws = mcp._kws_from("Claude Code user wanting skills, hooks and plugins; solo consulting")
+        for junk in ("user", "wanting", "solo", "consulting"):
+            self.assertNotIn(junk, kws)
+        self.assertIn("skills", kws)
 
 
 if __name__ == "__main__":
