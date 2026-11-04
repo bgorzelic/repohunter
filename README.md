@@ -1,3 +1,4 @@
+<!-- mcp-name: io.github.bgorzelic/repohunter -->
 <p align="center"><img src="site/og.png" alt="RepoHunter — reuse, don't reinvent" width="760"></p>
 
 <p align="center">
