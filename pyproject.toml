@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "repohunter"
+name = "repohunter-mcp"
 version = "0.2.1"
 description = "Reuse, don't reinvent — the reuse-first scout for open source. Evaluate repos for your project and your machine, then plan the integration."
 readme = "README.md"
@@ -24,8 +24,9 @@ dependencies = []  # stdlib only — no install step
 
 [project.urls]
 Homepage = "https://repohunter.dev"
-Repository = "https://github.com/meetziggy/repohunter"
-Changelog = "https://github.com/meetziggy/repohunter/blob/main/CHANGELOG.md"
+Repository = "https://github.com/bgorzelic/repohunter"
+Changelog = "https://github.com/bgorzelic/repohunter/blob/main/CHANGELOG.md"
+Issues = "https://github.com/bgorzelic/repohunter/issues"
 
 [project.scripts]
 repohunter = "repohunter:main"
