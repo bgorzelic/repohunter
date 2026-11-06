@@ -212,11 +212,30 @@ class VerdictSignals(unittest.TestCase):
     def test_oversize_release_notes_fail_closed_never_clean(self):
         # A hostile repo can pad notes past the scan cap so the incident wording is never read.
         # That must not look clean: report it, mark the scan partial, and never allow GO.
-        body = "x " * 30000 + "Telemetry is sent to our servers without consent."
+        body = "x " * 70000 + "Telemetry is sent to our servers without consent."
         out = self.evaluate(releases=[{"tag_name": "v", "published_at": _days_ago(1), "body": body}])
         self.assertEqual(out["verdict"], "MAYBE")
         self.assertEqual(out["signals"]["flags"][0]["kind"], "release-notes-truncated")
         self.assertTrue(out["signals"]["verdict_capped"])
+        self.assertFalse(out["signals"]["release_notes_fully_checked"])
+
+    def test_several_long_auto_generated_releases_are_fully_checked(self):
+        # Regression: CopilotKit/OpenBot has three 40k-59k-char generated changelogs; they used to
+        # trip the per-release cap and hold an otherwise-GO repo at MAYBE.
+        rels = [{"tag_name": "v%d" % i, "published_at": _days_ago(i + 1), "body": "- fix thing\n" * n}
+                for i, n in enumerate((4000, 4500, 5000))]
+        self.assertGreater(len(rels[2]["body"]), 50000)
+        out = self.evaluate(releases=rels)
+        self.assertEqual(out["verdict"], "GO")
+        self.assertTrue(out["signals"]["release_notes_fully_checked"])
+
+    def test_total_scan_budget_fails_closed_across_many_releases(self):
+        rels = [{"tag_name": "v%d" % i, "published_at": _days_ago(i + 1), "body": "y " * 60000}
+                for i in range(8)]
+        start = time.perf_counter()
+        out = self.evaluate(releases=rels)
+        self.assertLess(time.perf_counter() - start, 5.0)
+        self.assertEqual(out["verdict"], "MAYBE")
         self.assertFalse(out["signals"]["release_notes_fully_checked"])
 
     def test_long_but_scannable_release_notes_are_fully_checked(self):

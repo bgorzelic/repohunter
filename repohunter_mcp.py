@@ -226,7 +226,11 @@ INCIDENT_WINDOW_DAYS = 90
 ADVISORY_WINDOW_DAYS = 180
 # Strong, narrow phrases only: a project that fixes things responsibly must not be demoted for saying so.
 _CONSENT = r"without\s+(?:asking|(?:your\s+)?(?:consent|permission|knowledge)|opt[- ]?in)"
-SCAN_CHARS = 40000  # release bodies are untrusted (up to 125k chars); scan at most this, then fail closed
+# Release bodies are untrusted. GitHub caps a body at 125k chars, so one release is always scanned whole
+# (+ name); a total budget bounds the work across releases (the bounded patterns cost ~0.2s per 40k chars).
+# Anything past either limit fails closed rather than passing as clean.
+SCAN_CHARS = 130000
+SCAN_BUDGET = 400000
 # \w{0,12}, not \w*: an unbounded suffix next to the lazy gap below made matching quadratic (ReDoS).
 _EGRESS = r"(?:upload|send|sent|transmit|collect|share[ds]?|scann?(?:ed|ing)?|log(?:ged|ging)?|track(?:ed|ing)?)\w{0,12}"
 # "without asking" alone is ubiquitous in agent tooling ("agent edits files without asking"), so it only counts
@@ -258,17 +262,20 @@ def release_signals(slug):
     apath = "/repos/%s/security-advisories?per_page=10" % slug
     releases, advisories = _try(rpath), _try(apath)
     flags = []
+    budget = SCAN_BUDGET
     for r in releases or []:
         if not isinstance(r, dict) or _days(r.get("published_at")) > INCIDENT_WINDOW_DAYS:
             continue
         full = "%s\n%s" % (r.get("name") or "", r.get("body") or "")
-        text = full[:SCAN_CHARS]
+        limit = min(SCAN_CHARS, budget)
+        text = full[:limit]
+        budget -= len(text)
         base = {"tag": r.get("tag_name"), "published": (r.get("published_at") or "")[:10]}
-        if len(full) > SCAN_CHARS:
+        if len(full) > limit:
             # Fail closed: padding must not be able to push incident wording past the scan. A partial
             # scan is never "clean", and it blocks GO the same way a found incident does.
             flags.append(dict(base, kind="release-notes-truncated", caps_verdict=True,
-                              excerpt="%d chars; only the first %d were scanned" % (len(full), SCAN_CHARS)))
+                              excerpt="%d chars; only the first %d were scanned" % (len(full), limit)))
         m = _INCIDENT_RE.search(text)
         if m:
             flags.append(dict(base, kind="release-notes-privacy-or-security-incident",
